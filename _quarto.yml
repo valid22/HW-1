@@ -1,0 +1,33 @@
+project:
+  type: website
+  output-dir: docs
+  render:
+    - "index.qmd"
+    - "about.qmd"
+    - "posts/**/*.qmd"
+
+website:
+  title: "Stats & Data"
+  description: "Explorations in statistics, data science, and simulation"
+  navbar:
+    left:
+      - href: index.qmd
+        text: Home
+      - href: about.qmd
+        text: About
+
+format:
+  html:
+    theme: flatly
+    highlight-style: github
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-tools: true
+    fig-width: 9
+    fig-height: 5
+    fig-dpi: 150
+
+execute:
+  warning: false
+  message: false

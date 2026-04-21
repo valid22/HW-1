@@ -1,0 +1,7 @@
+---
+title: "About"
+---
+
+This site collects posts on statistics, simulation, and data analysis.
+Posts explore concepts by building them from scratch in code — the goal
+is to understand the machinery, not just use it.
