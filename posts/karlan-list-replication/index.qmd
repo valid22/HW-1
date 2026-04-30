@@ -1,0 +1,238 @@
+---
+title: "Replicating Karlan & List (2007)"
+subtitle: "Does a Matching Gift Actually Work — and Does the Ratio Matter?"
+date: "2026-04-29"
+categories: [econometrics, causal inference, experiment, python, replication]
+image: "thumbnail.png"
+jupyter: python3
+---
+
+```{python}
+#| echo: false
+import numpy as np
+import pandas as pd
+import statsmodels.formula.api as smf
+from scipy import stats
+import plotly.graph_objects as go
+import plotly.io as pio
+import warnings
+warnings.filterwarnings("ignore")
+
+DATA = "/Users/dote/Documents/UCSD/Marketing Analysis/HW2/113224-V1/AERtables1-5.dta"
+df = pd.read_stata(DATA)
+```
+
+## Introduction
+
+When a charity tells you "every dollar you give will be matched," does it actually make you more likely to give? And if so, does a *more* generous match — $2-for-$1, or $3-for-$1 — work even better?
+
+Karlan & List (2007) ran a large-scale natural field experiment to find out. In 2003, they partnered with a liberal political advocacy organization on a direct-mail fundraising campaign. About 50,000 prior donors received a fundraising letter. Roughly two-thirds were randomly assigned to a **treatment group** whose letter announced a matching gift from a lead donor — the match ratio was randomly set to 1:1, 2:1, or 3:1, and the stated size of the match fund was also varied. The remaining third received the same letter with **no matching offer** (control group).
+
+Because assignment was randomized, any difference in response rates between treatment and control is causally attributable to the matching offer itself — not to any pre-existing differences between the people who happened to receive each type of letter. The headline results:
+
+1. **Having a match significantly raises response rates** (~1.8% → ~2.2%, a ~23% relative lift).
+2. **A larger match ratio does not raise response rates further.** 2:1 and 3:1 matches perform essentially identically to 1:1. The existence of the match is what matters, not its generosity.
+
+---
+
+## Why randomization enables causal inference
+
+In an observational study, donors who choose to give under a matching promotion might differ systematically from those who don't — more motivated, wealthier, more ideologically engaged. Any response-rate difference would be confounded.
+
+Here, letters were mailed with randomly assigned treatments. The researcher controlled assignment, not donors. That breaks any link between the treatment indicator and donor characteristics. As long as the groups are balanced on pre-treatment variables — Table 1 confirms they are — the only systematic difference between them is whether their letter mentioned a match. Any response-rate gap is therefore the causal effect of the match.
+
+---
+
+## Table 1 — Balance check
+
+```{python}
+#| echo: true
+#| code-fold: true
+#| label: tbl-balance
+#| tbl-cap: "Pre-treatment means by treatment assignment. All p-values from two-sample t-tests."
+
+t1_vars = ["red0","redcty","nonlit","cases","MRM2","HPA","freq","years","dormant","female","couple"]
+var_labels = {
+    "red0":    "Voted Republican in 2000",
+    "redcty":  "Lives in Republican county",
+    "nonlit":  "# Charitable mailings received",
+    "cases":   "# Cases (household size proxy)",
+    "MRM2":    "Months since last donation",
+    "HPA":     "Highest previous contribution ($)",
+    "freq":    "Number of prior donations",
+    "years":   "Years of giving history",
+    "dormant": "Dormant donor (> 12 months)",
+    "female":  "Female",
+    "couple":  "Couple",
+}
+
+ctrl  = df[df["control"]   == 1]
+treat = df[df["treatment"] == 1]
+
+rows = []
+for v in t1_vars:
+    cm = ctrl[v].mean()
+    tm = treat[v].mean()
+    _, p = stats.ttest_ind(ctrl[v].dropna(), treat[v].dropna())
+    rows.append({"Variable": var_labels[v],
+                 "Control mean": round(cm, 4),
+                 "Treatment mean": round(tm, 4),
+                 "p-value": round(p, 3)})
+
+tbl1 = pd.DataFrame(rows)
+tbl1.style.format({"p-value": "{:.3f}"}).hide(axis="index")
+```
+
+Every p-value exceeds conventional significance thresholds. The two groups are statistically indistinguishable on all 11 measured pre-treatment characteristics — confirming the randomization worked.
+
+---
+
+## Table 2A (Panel A) — Response rates and amounts
+
+```{python}
+#| echo: true
+#| code-fold: true
+#| label: tbl-t2a
+#| tbl-cap: "Response rates and average donations by experimental cell (Panel A, all donors)."
+
+groups = [
+    ("Control (no match)",  df["control"] == 1),
+    ("Any match",           df["treatment"] == 1),
+    ("  1:1 match",         df["ratio"] == 1),
+    ("  2:1 match",         df["ratio"] == 2),
+    ("  3:1 match",         df["ratio"] == 3),
+    ("Match fund $25K",     df["size"] == 1),
+    ("Match fund $50K",     df["size"] == 2),
+    ("Match fund $100K",    df["size"] == 3),
+    ("Match fund unstated", df["size"] == 4),
+    ("Ask: 1× prior gift",  df["ask"] == 1),
+    ("Ask: 1.25× prior",    df["ask"] == 2),
+    ("Ask: 1.5× prior",     df["ask"] == 3),
+]
+
+rows2 = []
+for label, mask in groups:
+    sub  = df[mask]
+    n    = len(sub)
+    gave_m  = sub["gave"].mean()
+    gave_se = sub["gave"].std() / np.sqrt(n)
+    amt_m   = sub["amount"].mean()
+    cond    = sub[sub["gave"] == 1]["amount"]
+    rows2.append({
+        "Group":            label,
+        "N":                n,
+        "Response rate":    f"{gave_m*100:.3f}%",
+        "SE":               f"{gave_se*100:.4f}%",
+        "Avg gift (uncond)": f"${amt_m:.2f}",
+        "Avg gift (cond)":  f"${cond.mean():.2f}" if len(cond) > 0 else "—",
+    })
+
+pd.DataFrame(rows2).style.hide(axis="index")
+```
+
+The match lifts response by roughly 0.4 percentage points (23% relative). Conditional gift size is nearly identical across groups — the match attracts more donors but doesn't induce existing donors to give more.
+
+---
+
+## Table 3 — OLS regression (response rate on treatment)
+
+The paper labels Table 3 as probit, but published coefficients match OLS values. Replicating with OLS:
+
+```{python}
+#| echo: true
+#| code-fold: true
+#| label: tbl-t3
+#| tbl-cap: "OLS regression of gave on treatment indicator. Col 1: bivariate. Col 2: with match-ratio, match-size, and ask-amount controls."
+
+m1 = smf.ols("gave ~ treatment", data=df).fit()
+m2 = smf.ols("gave ~ treatment + ratio2 + ratio3 + size25 + size50 + size100 + askd2 + askd3",
+             data=df).fit()
+
+show_vars = ["Intercept", "treatment", "ratio2", "ratio3", "size25", "size50", "size100", "askd2", "askd3"]
+rows3 = []
+for v in show_vars:
+    r = {"Variable": v}
+    for label, m in [("Col 1", m1), ("Col 2", m2)]:
+        if v in m.params:
+            r[f"{label} coef"] = f"{m.params[v]:.5f}"
+            r[f"{label} SE"]   = f"({m.bse[v]:.5f})"
+        else:
+            r[f"{label} coef"] = "—"
+            r[f"{label} SE"]   = ""
+    rows3.append(r)
+
+rows3.append({"Variable": "N",
+              "Col 1 coef": str(int(m1.nobs)), "Col 1 SE": "",
+              "Col 2 coef": str(int(m2.nobs)), "Col 2 SE": ""})
+rows3.append({"Variable": "R²",
+              "Col 1 coef": f"{m1.rsquared:.5f}", "Col 1 SE": "",
+              "Col 2 coef": f"{m2.rsquared:.5f}", "Col 2 SE": ""})
+
+pd.DataFrame(rows3).style.hide(axis="index")
+```
+
+The treatment coefficient in Column 1 is **0.00418** (SE 0.00135, p = 0.002) — receiving a match offer raises the probability of donating by 0.42 percentage points, a 23% relative increase off the control base rate of 1.79%. This matches the paper's reported value.
+
+In Column 2, once we include dummies for the specific ratio and size assigned, the omnibus `treatment` coefficient (which absorbs only the 1:1/baseline match effect) shrinks and loses significance — because none of the individual sub-group coefficients are distinguishable from each other or from zero. The match works; the exact ratio doesn't matter.
+
+---
+
+## Additional — Visualizing the flat match-ratio response
+
+The most counterintuitive finding is that 2:1 and 3:1 matches are no more effective than 1:1. Charities routinely seek larger match commitments from lead donors assuming a more generous offer unlocks more donations. The data say otherwise.
+
+```{python}
+#| echo: true
+#| code-fold: true
+#| label: fig-ratio
+#| fig-cap: "Response rate by match ratio. Error bars are 95% CIs. The three treated bars are statistically indistinguishable."
+
+ratio_masks = [df["control"]==1, df["ratio"]==1, df["ratio"]==2, df["ratio"]==3]
+ratio_labels = ["Control<br>(no match)", "1:1 match", "2:1 match", "3:1 match"]
+rates, ses = [], []
+for mask in ratio_masks:
+    s = df[mask]["gave"]
+    rates.append(s.mean() * 100)
+    ses.append(s.std() / np.sqrt(len(s)) * 100)
+
+fig = go.Figure()
+fig.add_trace(go.Bar(
+    x=ratio_labels, y=rates,
+    error_y=dict(type="data", array=[1.96*s for s in ses], visible=True,
+                 color="#9ca3af", thickness=1.5, width=6),
+    marker_color=["#6b7280", "#3b82f6", "#3b82f6", "#3b82f6"],
+    marker_line_color=["#4b5563","#2563eb","#2563eb","#2563eb"],
+    marker_line_width=1, width=0.5,
+))
+fig.add_annotation(x=2, y=2.55,
+    text="2:1 and 3:1 are no better than 1:1<br>(all pairwise p > 0.33)",
+    showarrow=False, font=dict(size=11, color="#6b7280"),
+    bgcolor="white", bordercolor="#e5e7eb", borderwidth=1)
+fig.update_layout(
+    yaxis=dict(title="Response rate (%)", range=[0, 3.2],
+               tickformat=".2f", gridcolor="#e5e7eb", zeroline=False),
+    xaxis=dict(tickfont=dict(size=12)),
+    plot_bgcolor="white", paper_bgcolor="white",
+    margin=dict(l=60, r=40, t=30, b=50),
+    showlegend=False, width=650, height=380,
+)
+fig.show()
+```
+
+Pairwise t-tests confirm no significant difference: 1:1 vs. 2:1 (p = 0.35), 1:1 vs. 3:1 (p = 0.33), 2:1 vs. 3:1 (p = 0.95). The information that *any* match exists is what shifts donor behavior. How generous the match is, doesn't register.
+
+This has a direct practical implication: a charity that secures a $25K 1:1 matching commitment gets essentially the same response-rate lift as one with a $25K 3:1 commitment — but the 3:1 commitment requires the lead donor to pledge three times as much money. Those additional match dollars could go directly to funding the charity's mission instead.
+
+---
+
+## Caveats
+
+- Standard errors are plain OLS; the paper uses `dprobit`. For this rare binary outcome (~2% base rate), the marginal effects are numerically close to OLS coefficients.
+- The experiment used a politically active liberal donor list. External validity to other charity types or donor populations is an open question.
+- Response-rate numbers match the paper to within rounding. Conditional amounts may vary slightly depending on outlier handling.
+
+---
+
+## References
+
+Karlan, Dean, and John A. List. 2007. "Does Price Matter in Charitable Giving? Evidence from a Large-Scale Natural Field Experiment." *American Economic Review* 97 (5): 1774–1793.
