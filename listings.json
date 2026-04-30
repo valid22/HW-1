@@ -2,6 +2,7 @@
   {
     "listing": "/index.html",
     "items": [
+      "/posts/karlan-list-replication/index.html",
       "/posts/ab-testing-frequentist-stats/index.html"
     ]
   }
