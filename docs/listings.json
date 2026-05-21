@@ -2,6 +2,7 @@
   {
     "listing": "/index.html",
     "items": [
+      "/posts/maxdiff-survey-analysis/index.html",
       "/posts/blueprinty-poisson-regression/index.html",
       "/posts/karlan-list-replication/index.html",
       "/posts/ab-testing-frequentist-stats/index.html"
