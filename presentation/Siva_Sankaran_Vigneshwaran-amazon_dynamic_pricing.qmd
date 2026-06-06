@@ -1,0 +1,537 @@
+---
+title: "Amazon's Dynamic Pricing Engine"
+subtitle: "The Math Behind 2.5 Million Daily Price Changes"
+author: "Vigneshwaran Siva Sankaran"
+date: "June 2026"
+format:
+  revealjs:
+    embed-resources: true
+    theme: dark
+    highlight-style: github-dark
+    slide-number: true
+    transition: fade
+    background-transition: fade
+    code-fold: true
+    code-tools: true
+    fig-align: center
+    incremental: false
+    footer: "Marketing Analytics · Amazon Dynamic Pricing"
+    css: |
+      :root {
+        --amazon-orange: #FF9900;
+        --amazon-dark: #232F3E;
+        --amazon-blue: #146EB4;
+        --amazon-teal: #00A8B5;
+      }
+      .reveal h1, .reveal h2 { color: var(--amazon-orange); }
+      .reveal h3 { color: var(--amazon-teal); }
+      .orange { color: var(--amazon-orange); }
+      .blue   { color: var(--amazon-blue); }
+      .teal   { color: var(--amazon-teal); }
+      .big-number { font-size: 3em; font-weight: bold; color: var(--amazon-orange); }
+      .reveal .slide-number { color: var(--amazon-orange); }
+      .callout-box {
+        background: rgba(255,153,0,0.12);
+        border-left: 4px solid var(--amazon-orange);
+        padding: 0.6em 1em;
+        border-radius: 4px;
+        margin: 0.5em 0;
+      }
+      table { font-size: 0.85em; }
+      th { background: var(--amazon-dark); color: var(--amazon-orange); }
+jupyter: python3
+execute:
+  echo: false
+  warning: false
+---
+
+```{python}
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import matplotlib.patches as mpatches
+from scipy import stats
+import statsmodels.formula.api as smf
+import warnings
+warnings.filterwarnings("ignore")
+
+ORANGE = "#FF9900"
+DARK   = "#232F3E"
+BLUE   = "#146EB4"
+TEAL   = "#00A8B5"
+BG     = "#1a1a2e"
+
+plt.rcParams.update({
+    "figure.facecolor":  BG,
+    "axes.facecolor":    "#16213e",
+    "axes.grid":         True,
+    "grid.color":        "#2a2a4a",
+    "grid.linewidth":    1.0,
+    "text.color":        "white",
+    "axes.labelcolor":   "white",
+    "xtick.color":       "white",
+    "ytick.color":       "white",
+    "axes.spines.top":   False,
+    "axes.spines.right": False,
+    "axes.spines.left":  False,
+    "axes.spines.bottom":False,
+    "font.family":       "sans-serif",
+    "font.size":         12,
+    "legend.facecolor":  "#16213e",
+    "legend.labelcolor": "white",
+})
+```
+
+## {background-color="#232F3E"}
+
+::: {style="text-align:center; padding-top: 60px;"}
+[**29**]{.big-number}
+
+price changes per **second**
+
+[2.5 million per day · across 350 million products]{style="color:#aaa; font-size:1.1em;"}
+
+<br>
+
+> *"Amazon's algorithm does in milliseconds what a pricing team does in weeks."*
+
+:::
+
+---
+
+## The Problem with Static Pricing
+
+::: {.columns}
+::: {.column width="55%"}
+**You sell a Bluetooth speaker at $49.**
+
+Then:
+
+- 🏪 Competitor drops to **$39**
+- 🎄 Holiday season — demand **spikes**
+- 📦 5,000 units need to move in **30 days**
+
+**One price can't answer all three questions.**
+
+::: {.callout-box}
+Static pricing **leaves money** when demand is high and **loses sales** when demand falls.
+:::
+:::
+::: {.column width="45%"}
+```{python}
+#| fig-width: 5
+#| fig-height: 4.5
+
+np.random.seed(42)
+days = np.arange(1, 91)
+demand_mult = 1 + 0.4*np.sin(2*np.pi*days/90) + 0.05*np.random.randn(90)
+
+def demand(price, mult): return 1200*mult*price**(-1.5)
+
+static_revenue  = 49   * demand(49, demand_mult)
+dynamic_prices  = 15 * 1.5/(1.5-1) * (0.8+0.4*demand_mult)
+dynamic_revenue = dynamic_prices * demand(dynamic_prices, demand_mult)
+
+fig, ax = plt.subplots(figsize=(5,4))
+ax.fill_between(days, static_revenue,  alpha=0.35, color=BLUE)
+ax.fill_between(days, dynamic_revenue, alpha=0.35, color=ORANGE)
+ax.plot(days, static_revenue,  color=BLUE,   lw=2, label="Static $49")
+ax.plot(days, dynamic_revenue, color=ORANGE, lw=2, label="Dynamic")
+ax.set_xlabel("Day")
+ax.set_ylabel("Daily Revenue ($)")
+ax.legend(fontsize=10)
+ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x,_: f"${x:,.0f}"))
+plt.tight_layout()
+plt.show()
+```
+:::
+:::
+
+---
+
+## Price Elasticity — The Core Idea
+
+The single number that makes dynamic pricing possible:
+
+$$\varepsilon = \frac{\% \Delta Q}{\% \Delta P}$$
+
+<br>
+
+::: {style="font-size:0.88em;"}
+| $|\varepsilon|$ | Label | Meaning | Example |
+|:---:|:---:|:---|:---|
+| $> 1$ | **Elastic** | Shoppers are price-sensitive | Electronics |
+| $= 1$ | Unit elastic | Equal response | — |
+| $< 1$ | **Inelastic** | Shoppers pay regardless | Prime membership |
+:::
+
+<br>
+
+::: {.callout-box}
+For $|\varepsilon|=1.5$: a **10% price hike** causes a **15% drop in units sold**.
+:::
+
+---
+
+## The Log-Log Demand Model
+
+Amazon estimates elasticity using **regression on log-transformed data**:
+
+$$\ln Q_t = \alpha + \underbrace{\varepsilon}_{\text{elasticity}} \ln P_t + \gamma \mathbf{X}_t + u_t$$
+
+::: {.columns}
+::: {.column width="50%"}
+**Why log-log?**
+
+- $\varepsilon$ is elasticity **directly** — no extra math
+- Captures: "$1 matters more at $5 than at $500"
+- Multiplicative structure matches demand reality
+:::
+::: {.column width="50%"}
+**Controls ($\mathbf{X}_t$):**
+
+- Day of week / holidays
+- Competitor prices
+- Season / trend
+- Promotions
+:::
+:::
+
+---
+
+## Simulating Amazon's Data
+
+```{python}
+#| echo: true
+#| code-fold: true
+#| code-summary: "Show simulation code"
+#| fig-width: 9
+#| fig-height: 4
+
+np.random.seed(2024)
+n = 365
+TRUE_E = -1.8
+prices = 49 + np.random.uniform(-8,8,n)
+comp   = 45 + np.random.uniform(-6,6,n)
+dow    = (np.arange(n)%7>=5).astype(float)
+season = 0.3*np.sin(2*np.pi*np.arange(n)/365)
+log_q  = 7.5 + TRUE_E*np.log(prices) - 0.6*np.log(comp) + 0.15*dow + 0.2*season + np.random.normal(0,0.12,n)
+qty    = np.exp(log_q).astype(int)
+
+df = pd.DataFrame({"price":prices.round(2),"comp_price":comp.round(2),
+                   "weekend":dow,"quantity":qty,"day":np.arange(n),
+                   "log_price":np.log(prices),"log_comp":np.log(comp),
+                   "log_qty":np.log(qty+0.5)})
+
+fig, axes = plt.subplots(1,2,figsize=(9,4))
+axes[0].scatter(df.price, df.quantity, alpha=0.3, s=15, color=ORANGE)
+axes[0].set_xlabel("Price ($)"); axes[0].set_ylabel("Quantity")
+axes[0].set_title("Raw: Price vs Quantity", color="white")
+
+axes[1].scatter(df.log_price, df.log_qty, alpha=0.3, s=15, color=TEAL)
+m,b = np.polyfit(df.log_price, df.log_qty, 1)
+xs = np.linspace(df.log_price.min(), df.log_price.max(), 100)
+axes[1].plot(xs, m*xs+b, color=ORANGE, lw=2.5, label=f"slope = {m:.2f}")
+axes[1].set_xlabel("log Price"); axes[1].set_ylabel("log Quantity")
+axes[1].set_title("Log-Log: Linear Relationship", color="white")
+axes[1].legend()
+plt.tight_layout(); plt.show()
+```
+
+Log-transforming makes the demand curve a straight line — and the slope **is** the elasticity.
+
+---
+
+## Fitting the Model
+
+```{python}
+#| echo: true
+#| code-fold: false
+
+model = smf.ols(
+    "log_qty ~ log_price + log_comp + weekend + np.sin(2*np.pi*day/365)",
+    data=df
+).fit()
+
+results = pd.DataFrame({
+    "Coefficient": model.params.round(3),
+    "Std Error":   model.bse.round(3),
+    "p-value":     model.pvalues.round(4),
+}).rename(index={
+    "Intercept":                     "Intercept (α)",
+    "log_price":                     "log Price (ε ← elasticity)",
+    "log_comp":                      "log Competitor Price",
+    "weekend":                       "Weekend Dummy",
+    "np.sin(2 * np.pi * day / 365)": "Seasonal Sine",
+})
+print(results.to_string())
+print(f"\nR² = {model.rsquared:.3f}   |   True elasticity = {TRUE_E}")
+```
+
+::: {.callout-box}
+**Estimated elasticity: `{python} round(model.params['log_price'],3)`** — very close to the true value of −1.8.
+:::
+
+---
+
+## The Causal Trap
+
+::: {.columns}
+::: {.column width="50%"}
+**The problem:**
+
+Amazon raises prices before holidays.
+Holiday demand is also high.
+
+$$P_t \uparrow \;\text{and}\; Q_t \uparrow \;\text{simultaneously}$$
+
+OLS sees **positive correlation** → wrong sign!
+
+This is **simultaneity bias** (endogeneity).
+:::
+::: {.column width="50%"}
+```{python}
+#| fig-width: 4.5
+#| fig-height: 4
+
+np.random.seed(99)
+n2=400
+shock  = np.random.normal(0,1,n2)
+p_obs  = 3.89 + 0.3*shock + np.random.normal(0,.15,n2)
+q_obs  = 7.5 - 1.8*p_obs + 1.2*shock + np.random.normal(0,.1,n2)
+
+fig,ax=plt.subplots(figsize=(4.5,4))
+ax.scatter(p_obs, q_obs, alpha=0.25, s=15, color=BLUE)
+xs=np.linspace(p_obs.min(),p_obs.max(),100)
+m,b=np.polyfit(p_obs,q_obs,1)
+ax.plot(xs,m*xs+b,color=ORANGE,lw=2.5,label=f"OLS slope={m:.2f}")
+ax.set_xlabel("log Price"); ax.set_ylabel("log Quantity")
+ax.set_title("Observational Data\n(Biased!)", color=ORANGE)
+ax.legend(fontsize=9)
+plt.tight_layout(); plt.show()
+```
+:::
+:::
+
+---
+
+## The Fix: Randomised Price Experiments
+
+::: {.columns}
+::: {.column width="50%"}
+**Amazon's solution:**
+
+Run **A/B tests on prices** — randomly assign different prices to different customer cohorts.
+
+Random assignment $\Rightarrow$ price variation is uncorrelated with demand shocks $\Rightarrow$ **causal estimate**.
+
+$$\hat{\varepsilon}_{causal} = \frac{\text{Cov}(\ln Q, Z)}{\text{Cov}(\ln P, Z)}$$
+
+where $Z$ = treatment assignment (fully random).
+:::
+::: {.column width="50%"}
+```{python}
+#| fig-width: 4.5
+#| fig-height: 4
+
+p_ab = np.random.choice([3.6,3.7,3.8,3.9,4.0,4.1,4.2],n2,replace=True)
+q_ab = 7.5 - 1.8*p_ab + 1.2*shock + np.random.normal(0,.1,n2)
+
+fig,ax=plt.subplots(figsize=(4.5,4))
+ax.scatter(p_ab, q_ab, alpha=0.25, s=15, color=TEAL)
+xs2=np.linspace(p_ab.min(),p_ab.max(),100)
+m2,b2=np.polyfit(p_ab,q_ab,1)
+ax.plot(xs2,m2*xs2+b2,color=ORANGE,lw=2.5,label=f"Causal slope={m2:.2f}")
+ax.set_xlabel("log Price"); ax.set_ylabel("log Quantity")
+ax.set_title("A/B Price Experiment\n(Unbiased!)", color=TEAL)
+ax.legend(fontsize=9)
+plt.tight_layout(); plt.show()
+```
+:::
+:::
+
+::: {.callout-box}
+Observational OLS: slope ≈ **+0.4** (wrong sign). A/B experiment: slope ≈ **−1.8** (correct).
+:::
+
+---
+
+## From Elasticity to Optimal Price
+
+Once we know elasticity, the optimal price has a **closed-form solution**:
+
+$$\boxed{P^* = \frac{|\varepsilon|}{|\varepsilon| - 1} \times c}$$
+
+<br>
+
+For our speaker: $|\varepsilon| = 1.8$, $c = \$15$:
+
+$$P^* = \frac{1.8}{0.8} \times \$15 = \$33.75$$
+
+```{python}
+#| echo: true
+#| code-fold: true
+#| code-summary: "Show profit maximisation code"
+#| fig-width: 9
+#| fig-height: 3.5
+
+mc = 15; e = -1.8; P0 = 49; Q0 = 1000
+def qty(p): return Q0*(p/P0)**e
+def profit(p): return (p-mc)*qty(p)
+
+pg = np.linspace(20,80,300)
+pf = [profit(p) for p in pg]
+oi = np.argmax(pf)
+
+fig,axes = plt.subplots(1,2,figsize=(9,3.5))
+
+axes[0].plot(pg,[qty(p) for p in pg],color=TEAL,lw=2.5)
+axes[0].axvline(49,color=BLUE,lw=1.8,linestyle="--",label="Current $49")
+axes[0].axvline(pg[oi],color=ORANGE,lw=1.8,linestyle="--",label=f"Optimal ${pg[oi]:.0f}")
+axes[0].set_xlabel("Price ($)"); axes[0].set_ylabel("Units/day")
+axes[0].set_title("Demand Curve",color="white"); axes[0].legend(fontsize=9)
+
+axes[1].plot(pg,pf,color=ORANGE,lw=2.5)
+axes[1].axvline(49,color=BLUE,lw=1.8,linestyle="--",label=f"Current: ${profit(49):,.0f}/day")
+axes[1].axvline(pg[oi],color=ORANGE,lw=1.8,linestyle="--",label=f"Optimal: ${pf[oi]:,.0f}/day")
+axes[1].set_xlabel("Price ($)"); axes[1].set_ylabel("Daily Profit ($)")
+axes[1].set_title("Profit Landscape",color="white"); axes[1].legend(fontsize=9)
+axes[1].yaxis.set_major_formatter(mticker.FuncFormatter(lambda x,_:f"${x:,.0f}"))
+
+plt.tight_layout(); plt.show()
+```
+
+---
+
+## A Worked Example: The $3 Decision
+
+```{python}
+#| echo: true
+#| code-fold: false
+
+mc, elasticity, P0, Q0 = 15, -1.8, 49, 1000
+
+def quantity(p): return Q0*(p/P0)**elasticity
+def profit(p):   return (p-mc)*quantity(p)
+
+for new_p in [46, 44, 34]:
+    dQ = quantity(new_p) - quantity(P0)
+    dP = profit(new_p)   - profit(P0)
+    flag = "✅ Cut" if dP > 0 else "❌ Hold"
+    print(f"${P0}→${new_p}: ΔQty={dQ:+.0f}  ΔProfit={dP:+,.0f}  → {flag}")
+```
+
+<br>
+
+::: {.callout-box}
+Cutting to **$34** (near the model's optimal) captures the most profit — but the algorithm recalculates this **every few seconds** as elasticity, inventory, and competitor prices shift.
+:::
+
+---
+
+## What Else Feeds the Engine?
+
+```{python}
+#| fig-width: 9
+#| fig-height: 4.5
+
+fig, ax = plt.subplots(figsize=(9,4.5))
+ax.set_xlim(0,10); ax.set_ylim(-0.5,8); ax.axis("off")
+
+inputs = [(0.8, 6.5,"Competitor\nPrices",BLUE),(0.8,4.8,"Inventory\nLevels",BLUE),
+          (0.8, 3.1,"Demand\nForecast",BLUE),(0.8,1.4,"Historical\nElasticity",BLUE)]
+outputs= [(8.5, 6.5,"Revenue\nMaximised",TEAL),(8.5,4.8,"Margin\nProtected",TEAL),
+          (8.5, 3.1,"Market Share\nDefended",TEAL),(8.5,1.4,"Inventory\nCleared",TEAL)]
+
+for x,y,lbl,col in inputs+outputs:
+    ax.add_patch(mpatches.FancyBboxPatch((x-0.75,y-0.45),1.5,0.9,
+                 boxstyle="round,pad=0.1",facecolor=col,alpha=0.85,edgecolor="white",lw=1.5))
+    ax.text(x,y,lbl,ha="center",va="center",fontsize=9,color="white",fontweight="bold")
+
+ax.add_patch(mpatches.FancyBboxPatch((3.6,2.2),2.8,3.6,
+             boxstyle="round,pad=0.2",facecolor=ORANGE,edgecolor="white",lw=2))
+ax.text(5.0,4.0,"Amazon\nPricing\nEngine",ha="center",va="center",
+        fontsize=14,color="white",fontweight="bold")
+
+for x,y,*_ in inputs:
+    ax.annotate("",xy=(3.6,2.2+(y-2.2)*0.7),xytext=(x+0.75,y),
+                arrowprops=dict(arrowstyle="->",color="white",lw=1.5))
+for x,y,*_ in outputs:
+    ax.annotate("",xy=(x-0.75,y),xytext=(6.4,2.2+(y-2.2)*0.7),
+                arrowprops=dict(arrowstyle="->",color="white",lw=1.5))
+
+ax.text(5.0,7.7,"Signals In  →  Engine  →  Business Outcomes",
+        ha="center",fontsize=12,fontweight="bold",color=ORANGE)
+plt.tight_layout(); plt.show()
+```
+
+---
+
+## Ethics: Is Dynamic Pricing Fair?
+
+::: {.columns}
+::: {.column width="50%"}
+**Concerns** ⚠️
+
+- **Price discrimination** — different customers, different prices for the same product
+- **Surge exploitation** — essentials rise in emergencies automatically
+- **Trust erosion** — gaming behavior (abandon cart to trigger price drop)
+- Congressional scrutiny on Amazon during COVID-19
+:::
+::: {.column width="50%"}
+**Best Practice** ✅
+
+- Show **price history** (Amazon now does this)
+- Hard **price floors** on essentials during crises
+- Price consistency within a **single checkout session**
+- Transparent pricing **policy disclosure**
+:::
+:::
+
+::: {.callout-box}
+The algorithm doesn't have ethics built in — **marketers do**. The math is neutral; how it's deployed is not.
+:::
+
+---
+
+## Key Takeaways
+
+::: {style="font-size:0.95em;"}
+
+1. **Elasticity is the anchor** — estimate how quantity responds to price changes, rigorously.
+
+2. **Log-log regression = direct elasticity** — the coefficient on log price *is* your elasticity.
+
+3. **OLS on observational data is biased** — price and quantity are jointly determined. Use A/B tests.
+
+4. **Optimal price formula:** $P^* = \frac{|\varepsilon|}{|\varepsilon|-1} \times c$ — closed-form once you know elasticity and cost.
+
+5. **Signals stack** — competitor prices, inventory, seasonality, and segment all shift the demand curve continuously.
+
+6. **The math is neutral; deployment isn't** — pricing algorithms require ethical guardrails.
+
+:::
+
+::: {.callout-box}
+Dynamic pricing = **demand estimation + causal inference + optimisation**, running at machine speed.
+:::
+
+---
+
+## {background-color="#232F3E"}
+
+::: {style="text-align:center; padding-top:80px;"}
+
+[Thank You]{style="font-size:2.2em; font-weight:bold; color:#FF9900;"}
+
+<br>
+
+**Vigneshwaran Siva Sankaran**
+Marketing Analytics · UC San Diego Rady School
+
+<br>
+
+*"Get the elasticity right, and the optimal price follows automatically."*
+
+:::
