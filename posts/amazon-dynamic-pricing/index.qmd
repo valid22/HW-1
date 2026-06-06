@@ -103,7 +103,6 @@ axes[1].legend(fontsize=11)
 axes[1].yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:.0f}"))
 
 plt.tight_layout()
-plt.savefig("posts/amazon-dynamic-pricing/thumbnail.png", dpi=150, bbox_inches="tight")
 plt.show()
 ```
 
