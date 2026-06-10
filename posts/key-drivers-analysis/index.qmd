@@ -1,0 +1,199 @@
+---
+title: "Key Drivers Analysis"
+subtitle: "Comparing methods for ranking the importance of customer satisfaction drivers"
+date: "2026-06-10"
+categories: [statistics, regression, random forest, key drivers, python]
+jupyter: python3
+---
+
+When a survey asks customers to rate their overall satisfaction along with a handful of perceptions about a brand (e.g., "this brand is trustworthy," "this brand is easy to use"), a common business question is: **which of these perceptions matters most for driving overall satisfaction?**
+
+There is no single "correct" answer to this question — different importance metrics make different assumptions and can disagree, sometimes substantially. In this post I replicate a "key drivers" table that compares six different importance metrics side by side:
+
+1. **Pearson correlations** with the outcome
+2. **Standardized regression coefficients** from a linear regression
+3. **"Usefulness"** (drop-one R²): how much R² drops when a variable is removed from the model
+4. **Shapley values** for a linear regression (using R² as the value function)
+5. **Johnson's relative weights** (epsilon / relative weight analysis)
+6. **Mean decrease in Gini** from a random forest
+
+## The data
+
+The dataset contains responses from 2,553 customers. The outcome is `satisfaction` (a 1–5 rating), and the nine predictors are binary (0/1) indicators for whether the respondent associates the brand with each of the following perceptions:
+
+`trust`, `build` (well built), `differs` (different from competitors), `easy` (easy to use), `appealing` (appealing to me), `rewarding`, `popular`, `service`, `impact`.
+
+```{python}
+#| code-fold: true
+import numpy as np
+import pandas as pd
+from itertools import combinations
+from math import comb
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestClassifier
+
+df = pd.read_csv("data_for_drivers_analysis.csv")
+y = df["satisfaction"].values
+X = df.drop(columns=["brand", "id", "satisfaction"])
+features = X.columns.tolist()
+Xv = X.values
+n, k = Xv.shape
+
+df.head()
+```
+
+## Method 1: Pearson correlations
+
+The simplest measure of "importance" is just the correlation between each predictor and the outcome.
+
+```{python}
+#| code-fold: true
+pearson = X.apply(lambda c: np.corrcoef(c, y)[0, 1])
+pearson
+```
+
+## Method 2: Standardized regression coefficients
+
+Next, I fit a multiple linear regression of `satisfaction` on all nine predictors, after standardizing every variable (mean 0, standard deviation 1). The resulting coefficients are directly comparable in magnitude, and reflect each variable's *unique* linear contribution after controlling for the others.
+
+```{python}
+#| code-fold: true
+Xs = (Xv - Xv.mean(0)) / Xv.std(0, ddof=0)
+ys = (y - y.mean()) / y.std(ddof=0)
+
+lr_full = LinearRegression().fit(Xs, ys)
+std_coef = lr_full.coef_
+pd.Series(std_coef, index=features)
+```
+
+## Method 3: "Usefulness" (drop-one R²)
+
+The "usefulness" of a predictor is defined as the drop in R² when that predictor is removed from a model containing all the others. This captures each variable's unique explanatory contribution, holding the rest of the model fixed.
+
+```{python}
+#| code-fold: true
+def r2(cols):
+    if len(cols) == 0:
+        return 0.0
+    m = LinearRegression().fit(Xv[:, cols], y)
+    return m.score(Xv[:, cols], y)
+
+all_idx = list(range(k))
+full_r2 = r2(all_idx)
+
+usefulness = []
+for i in range(k):
+    cols_without_i = [j for j in all_idx if j != i]
+    usefulness.append(full_r2 - r2(cols_without_i))
+
+usefulness = np.array(usefulness)
+print(f"Full model R-squared: {full_r2:.4f}")
+pd.Series(usefulness, index=features)
+```
+
+## Method 4: Shapley values (linear regression, R² as the value function)
+
+Shapley values come from cooperative game theory and provide a principled way to split "credit" for the model's overall fit (R²) among the predictors. For each variable, the Shapley value is the *average marginal contribution* to R² across every possible ordering (coalition) of the other variables.
+
+With 9 predictors there are $2^9 = 512$ possible subsets, so a brute-force computation is entirely feasible. I implement this from scratch below: for every variable $i$, I loop over every subset $S$ of the *other* variables, compute $R^2(S \cup \{i\}) - R^2(S)$, and weight that marginal contribution by
+
+$$
+w(|S|) = \frac{|S|! \,(k - |S| - 1)!}{k!}
+$$
+
+which is the probability of that subset arising under a random ordering of all $k$ variables.
+
+```{python}
+#| code-fold: true
+shapley = np.zeros(k)
+
+for i in range(k):
+    others = [j for j in all_idx if j != i]
+    total = 0.0
+    for s in range(0, k):
+        weight = comb(k - 1, s) ** -1 / k  # = s!(k-s-1)!/k!
+        for subset in combinations(others, s):
+            cols_with_i = list(subset) + [i]
+            cols_without_i = list(subset)
+            total += weight * (r2(cols_with_i) - r2(cols_without_i))
+    shapley[i] = total
+
+print(f"Sum of Shapley values: {shapley.sum():.4f}  (should equal full R-squared = {full_r2:.4f})")
+pd.Series(shapley, index=features)
+```
+
+A nice property of Shapley values is that they sum exactly to the full model's R², so they can be interpreted as "each variable's share of the explained variance."
+
+## Method 5: Johnson's relative weights
+
+Johnson's relative weight analysis addresses multicollinearity by transforming the (correlated) predictors into an orthogonal set of variables $Z$ that are maximally related to the original predictors $X$, via the eigendecomposition of the predictor correlation matrix. The outcome is then regressed on $Z$, and the resulting standardized coefficients are "transformed back" to apportion $R^2$ across the original predictors.
+
+```{python}
+#| code-fold: true
+corr = np.corrcoef(Xv.T)
+eigvals, eigvecs = np.linalg.eigh(corr)
+Lambda = eigvecs @ np.diag(np.sqrt(eigvals)) @ eigvecs.T  # symmetric square root of corr matrix
+
+Z = Xs @ np.linalg.inv(Lambda)
+beta_z = LinearRegression().fit(Z, ys).coef_
+
+raw_weights = (Lambda ** 2) @ (beta_z ** 2)
+johnson = raw_weights / raw_weights.sum() * full_r2  # rescale so weights sum to R^2
+
+print(f"Sum of Johnson's relative weights: {johnson.sum():.4f}")
+pd.Series(johnson, index=features)
+```
+
+Like the Shapley values, Johnson's relative weights sum to the model's total R² and can be read as each variable's share of explained variance — but they're far cheaper to compute than brute-force Shapley values for large numbers of predictors.
+
+## Method 6: Mean decrease in Gini (random forest)
+
+Finally, I fit a random forest classifier (treating `satisfaction`'s five levels as classes) and extract each predictor's **mean decrease in Gini impurity** — `sklearn`'s default `feature_importances_` for a `RandomForestClassifier`. This is a non-linear, non-parametric measure of importance that can pick up interactions and threshold effects that a linear model would miss.
+
+```{python}
+#| code-fold: true
+rf = RandomForestClassifier(n_estimators=1000, random_state=42, n_jobs=-1)
+rf.fit(Xv, y)
+gini = rf.feature_importances_
+pd.Series(gini, index=features)
+```
+
+## Putting it all together
+
+The table below combines all six metrics. Pearson correlations, standardized coefficients, and the random forest's Gini importances are reported in their natural units (and don't sum to anything in particular), while usefulness, Shapley values, and Johnson's relative weights are all expressed as a share of the model's total R² so they sum to 100%.
+
+```{python}
+#| code-fold: true
+results = pd.DataFrame({
+    "Perception": features,
+    "Pearson Correlation": pearson.values,
+    "Std. Regression Coef.": std_coef,
+    "Usefulness": usefulness,
+    "Shapley Value": shapley,
+    "Johnson's Relative Weight": johnson,
+    "RF Mean Decrease in Gini": gini,
+})
+
+results_pct = results.copy()
+for col in ["Usefulness", "Shapley Value", "Johnson's Relative Weight"]:
+    results_pct[col] = results_pct[col] / results_pct[col].sum()
+
+results_pct = results_pct.sort_values("Shapley Value", ascending=False).reset_index(drop=True)
+
+results_display = results_pct.copy()
+for col in ["Pearson Correlation", "Std. Regression Coef.", "RF Mean Decrease in Gini"]:
+    results_display[col] = results_display[col].round(3)
+for col in ["Usefulness", "Shapley Value", "Johnson's Relative Weight"]:
+    results_display[col] = (results_display[col] * 100).round(1).astype(str) + "%"
+
+results_display
+```
+
+## Takeaways
+
+A few things stand out from this comparison:
+
+- **`trust`, `impact`, and `service`** consistently rank as the top three drivers across nearly every method — Pearson correlation, standardized coefficients, usefulness, Shapley values, and Johnson's weights all agree on this.
+- **The decomposition-based methods (Shapley and Johnson's weights) tell almost the same story here**, which makes sense: with only mild correlation among the nine binary predictors, the brute-force Shapley computation and the eigen-based Johnson approximation converge to nearly identical answers — and both sum neatly to the model's R² of about 0.109.
+- **The random forest's Gini importance ranks the predictors quite differently**, spreading importance more evenly across all nine variables (e.g., `popular` and `rewarding` rank much higher under Gini importance than under any of the linear-model-based metrics). This is a useful reminder that tree-based importance measures capture different information — including non-linearities and interactions — than linear-model-based decompositions, and the two views are best used together rather than in place of one another.
+- Overall, this particular brand's customers seem to be most influenced by **whether they trust the brand, whether it has a meaningful impact on them, and the quality of service** — these would be the natural starting points for a team trying to improve overall satisfaction scores.
