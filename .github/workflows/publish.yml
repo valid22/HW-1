@@ -31,7 +31,7 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          pip install numpy scipy matplotlib pandas statsmodels seaborn great_tables jupyter nbformat nbclient
+          pip install numpy scipy matplotlib pandas statsmodels seaborn great_tables jupyter nbformat nbclient scikit-learn
 
       - name: Set up Quarto
         uses: quarto-dev/quarto-actions/setup@v2
